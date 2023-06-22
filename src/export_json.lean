@@ -156,16 +156,16 @@ set_option old_structure_cmd true
 
 structure ext_tactic_doc_entry extends tactic_doc_entry :=
 (imported : string)
+(description : string)
 
-meta def ext_tactic_doc_entry.to_json : ext_tactic_doc_entry → json
-| ⟨name, category, decl_names, tags, description, _, imported⟩ :=
+meta def ext_tactic_doc_entry.to_json (e : ext_tactic_doc_entry) : json :=
 json.object [
-  ("name", name),
-  ("category", category.to_string),
-  ("decl_names", json.of_string_list (decl_names.map to_string)),
-  ("tags", json.of_string_list tags),
-  ("description", description),
-  ("import", imported)]
+  ("name", e.name),
+  ("category", e.category.to_string),
+  ("decl_names", json.of_string_list (e.decl_names.map to_string)),
+  ("tags", json.of_string_list e.tags),
+  ("description", e.description),
+  ("import", e.imported)]
 end
 
 meta instance {α} [has_coe α json] : has_coe (option α) json :=
@@ -367,19 +367,26 @@ meta def extract_name : expr → tactic (exceptional (option string))
       end
     | _ := pure $ pure $ some type_name.to_string
     end
-  | expr.pi _ _ _ _          := pure $ pure $ some "pi"
+  | e@(expr.pi name bi var_type body) := do
+      is_p ← is_prop e <|> (tactic.fail format!"Could not analyze {e}"),
+      match is_p, body.has_var with
+      | ff, ff := pure $ pure $ some "function"
+      | ff, tt := pure $ pure $ some "pi"
+      | tt, ff := pure $ pure $ some "implies"
+      | tt, tt := pure $ pure $ some "forall"
+      end
   | expr.sort level.zero     := pure $ pure $ some "Prop"
   | expr.sort (level.succ l) := pure $ pure $ some "Type"
   | expr.sort l              := pure $ pure $ some "Sort"
   | expr.local_const _ _ _ _ := pure $ pure $ none
   | expr.macro _ _           := pure $ pure $ none -- TODO: unfold macros?
-  | expr.lam _ _ _ body      := mk_fresh_name >>= extract_name ∘ body.instantiate_var ∘ mk_local
+  | expr.lam name bi var_type body :=
+      mk_local' name bi var_type >>= extract_name ∘ body.instantiate_var
   | expr.var i               := pure $ exceptional.fail format!"is a var, not a constant"
   | expr.mvar _ _ _          := pure $ exceptional.fail format!"is a mvar, not a constant"
   | expr.app _ _             := pure $ exceptional.fail format!"is a app, not a constant"
   | expr.elet _ _ _ _        := pure $ exceptional.fail format!"is a elet, not a constant"
   end
-
 
 /-- Extract `[foo, bar]` from `has_pow foo bar`.
 
@@ -437,14 +444,17 @@ meta def name.imported_always (decl_name : name) : bool :=
 let env := environment.from_imported_module_name `system.random in
 env.contains decl_name
 
-meta def tactic_doc_entry.add_import : tactic_doc_entry → ext_tactic_doc_entry
-| ⟨name, category, [], tags, description, idf⟩ := ⟨name, category, [], tags, description, idf, ""⟩
-| ⟨name, category, rel_decls@(decl_name::_), tags, description, idf⟩ :=
-  let imported := if decl_name.imported_always then "always imported"
-                  else if decl_name.imported_by_tactic_basic then "tactic.basic"
-                  else if decl_name.imported_by_tactic_default then "tactic"
-                  else "" in
-  ⟨name, category, rel_decls, tags, description, idf, imported⟩
+meta def tactic_doc_entry.add_import : tactic_doc_entry × string → ext_tactic_doc_entry | (e, desc) :=
+let imported :=
+  match e.decl_names with
+  | decl_name::_ :=
+    if decl_name.imported_always then "always imported"
+    else if decl_name.imported_by_tactic_basic then "tactic.basic"
+    else if decl_name.imported_by_tactic_default then "tactic"
+    else ""
+  | [] := ""
+  end in
+{ e with imported := imported, description := desc }
 
 meta def format_tactic_docs : tactic json :=
 do l ← list.map tactic_doc_entry.add_import <$> get_tactic_doc_entries,
